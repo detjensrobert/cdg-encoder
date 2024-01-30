@@ -3,12 +3,12 @@
 video2cdg: convert video to CD+G graphics
 
 Usage:
-    video2cdg INPUT [-v] [--frames-dir DIR] [--monitor MON]
+    video2cdg INPUT [-v] [--frames-dir <dir>] [--monitor <path/to.mp4>]
 
 Options:
-    --frames-dir DIR    Tempdir to store intermediary frames in [default: ./frames]
-    --monitor MON       Create a 'monitor' video MON from output frame data
-    -v --verbose        Show ffmpeg's output
+    --frames-dir <dir>        Tempdir to store intermediary frames in [default: ./frames]
+    --monitor <path/to.mp4>   Create a 'monitor' video from output frame data
+    -v --verbose              Show ffmpeg transcode output
 
 Generates
 
@@ -52,22 +52,22 @@ if os.path.exists(framedir) and len(os.listdir(framedir)) > 0:
 input = ffmpeg.input(infile)
 
 # reduce framerate to CD+G full update speed
-in_v = input["v"].filter("fps", fps=(1 / SECONDS_PER_FRAME))
+in_v = input.video.filter("fps", fps=(1 / SECONDS_PER_FRAME))
 
 
-# scale then crunch
-scaled = in_v.filter("scale", width=288, height=192).split()
+# # == scale then crunch ==
+# scaled = in_v.filter("scale", width=288, height=192).split()
 
-# crunch colors to 16 colors per frame
-palette = scaled[0].filter("palettegen", stats_mode="single",
-                           max_colors=16, reserve_transparent=0)
-crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
+# # crunch colors to 16 colors per frame
+# palette = scaled[0].filter("palettegen", stats_mode="single",
+#                            max_colors=16, reserve_transparent=0)
+# crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
 
-# force 4-4-4 color depth
-final = crunched.filter("format", pix_fmts="rgb444be")
+# # force 4-4-4 color depth
+# final = crunched.filter("format", pix_fmts="rgb444be")
 
 
-# # crunch then scale
+# # == crunch then scale ==
 # in_vs = in_v.split()
 
 # palette = (
@@ -83,22 +83,42 @@ final = crunched.filter("format", pix_fmts="rgb444be")
 # final = scaled.filter("format", pix_fmts="rgb444be")
 
 
-# 'monitor' video to examine what frames would be
-if monfile:
-    print(f":: Creating monitor file {monfile}...")
-    (
-        ffmpeg.concat(final, input["a"], v=1, a=1)
-        .output(monfile)
-        .overwrite_output()
-        .run(quiet=quiet)
-    )
+# == pure mono ==
+scaled = in_v.filter("scale", width=288, height=192)
+
+# # crunch colors to 16 colors per frame
+# palette = scaled[0].filter("palettegen", stats_mode="single",
+#                            max_colors=16, reserve_transparent=0)
+# crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
+
+# # force 4-4-4 color depth
+# final = crunched.filter("format", pix_fmts="rgb444be")
+black = ffmpeg.input('color=Black:s=288x192', f='lavfi')
+white = ffmpeg.input('color=White:s=288x192', f='lavfi')
+gray = ffmpeg.input('color=DarkGray:s=288x192', f='lavfi')
+
+final = ffmpeg.filter([scaled, gray, black, white], "threshold")
+
+
 
 
 # 2. output frames as separate images
 print(f":: Creating frames under {framedir}...")
 os.makedirs(framedir, exist_ok=True)
-(final.output(f"{framedir}/%05d.png").run(quiet=quiet))
+print(final.output("test").compile())
+final.output(f"{framedir}/%05d.bmp").run(quiet=quiet)
 
+
+# 'monitor' video of converted frames
+if monfile:
+    print(f":: Creating monitor file {monfile}...")
+    frames = ffmpeg.input(f"{framedir}/*.bmp", pattern_type='glob', framerate=(1 / SECONDS_PER_FRAME))
+    (
+        ffmpeg.concat(frames, input.audio, v=1, a=1)
+        .output(monfile)
+        .overwrite_output()
+        .run(quiet=quiet)
+    )
 
 # 3. convert to CDG
 print(f":: Converting frames to CDG packets...")
