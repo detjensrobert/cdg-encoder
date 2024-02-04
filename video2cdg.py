@@ -3,7 +3,7 @@
 video2cdg: convert video to CD+G graphics
 
 Usage:
-    video2cdg INPUT [-v] [--frames-dir <dir>] [--monitor <path/to.mp4>]
+    video2cdg <input.mp4> [-v] [--frames-dir <dir>] [--monitor <path/to.mp4>]
 
 Options:
     --frames-dir <dir>        Tempdir to store intermediary frames in [default: ./frames]
@@ -18,10 +18,12 @@ import ffmpeg
 import docopt
 import PIL
 import os
+from pathlib import Path
 
-import libcdg
+from libcdg import libcdg
 
-SECONDS_PER_FRAME = 4.0
+# SECONDS_PER_FRAME = 4.0
+SECONDS_PER_FRAME = 2.79
 
 # === STEPS ===
 # 1. transcode input file to 288x192 (usable resolution of CD+G)
@@ -31,10 +33,12 @@ SECONDS_PER_FRAME = 4.0
 
 ARGS = docopt.docopt(__doc__)
 
-infile = ARGS["INPUT"]
+infile = ARGS["<input.mp4>"]
 framedir = ARGS["--frames-dir"]
 monfile = ARGS["--monitor"]
 quiet = not ARGS["--verbose"]
+
+out = Path(infile).stem
 
 if not quiet:
     print(f"args: {ARGS}")
@@ -93,26 +97,25 @@ scaled = in_v.filter("scale", width=288, height=192)
 
 # # force 4-4-4 color depth
 # final = crunched.filter("format", pix_fmts="rgb444be")
-black = ffmpeg.input('color=Black:s=288x192', f='lavfi')
-white = ffmpeg.input('color=White:s=288x192', f='lavfi')
-gray = ffmpeg.input('color=DarkGray:s=288x192', f='lavfi')
+black = ffmpeg.input("color=Black:s=288x192", f="lavfi")
+white = ffmpeg.input("color=White:s=288x192", f="lavfi")
+gray = ffmpeg.input("color=DarkGray:s=288x192", f="lavfi")
 
 final = ffmpeg.filter([scaled, gray, black, white], "threshold")
-
-
 
 
 # 2. output frames as separate images
 print(f":: Creating frames under {framedir}...")
 os.makedirs(framedir, exist_ok=True)
-print(final.output("test").compile())
-final.output(f"{framedir}/%05d.bmp").run(quiet=quiet)
+final.output(f"{framedir}/%05d.png").run(quiet=quiet)
 
 
 # 'monitor' video of converted frames
 if monfile:
     print(f":: Creating monitor file {monfile}...")
-    frames = ffmpeg.input(f"{framedir}/*.bmp", pattern_type='glob', framerate=(1 / SECONDS_PER_FRAME))
+    frames = ffmpeg.input(
+        f"{framedir}/*.png", pattern_type="glob", framerate=(1 / SECONDS_PER_FRAME)
+    )
     (
         ffmpeg.concat(frames, input.audio, v=1, a=1)
         .output(monfile)
@@ -122,13 +125,25 @@ if monfile:
 
 # 3. convert to CDG
 print(f":: Converting frames to CDG packets...")
-for framefile in [f"{framedir}/{f}" for f in os.listdir(framedir)]:
+packets = b""
+
+frames = os.listdir(framedir)
+frames.sort()
+for f in frames:
     # extract palette
     # partition to cells
     # encode cells
     # fill remaining time
+    file = f"{framedir}/{f}"
 
-    print(framefile)
-    libcdg.packets_from_img(framefile)
+    # print(file)
+    fpk = libcdg.image_to_packets(file)
+    # print(f"frame took {len(fpk)} bytes ( {len(fpk) / 300} seconds ) ")
+    packets += fpk
 
-    exit()
+
+# 4. output .cdg + .mp3
+with open(f"{out}.cdg", "wb") as outfile:
+    outfile.write(packets)
+
+input.audio.output(f"{out}.mp3").overwrite_output().run(quiet=quiet)
