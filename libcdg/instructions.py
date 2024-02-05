@@ -14,6 +14,7 @@ Low level functions for creating CD+G packets directly.
 
 # meta packet assembler
 def _packet(instruction, data):
+    # we dont care about parity for now
     parity_q = b"\x00" * 2
     parity_p = b"\x00" * 4
 

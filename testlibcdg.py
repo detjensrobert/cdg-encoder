@@ -27,4 +27,4 @@ for framefile in [f"{FRAMEDIR}/{f}" for f in frames]:
     packets = libcdg.image_to_packets(framefile)
 
     # print(packets)
-    out.write(packets)
+    out.writelines(packets)

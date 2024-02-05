@@ -59,16 +59,16 @@ input = ffmpeg.input(infile)
 in_v = input.video.filter("fps", fps=(1 / SECONDS_PER_FRAME))
 
 
-# # == scale then crunch ==
-# scaled = in_v.filter("scale", width=288, height=192).split()
+# == scale then crunch ==
+scaled = in_v.filter("scale", width=288, height=192).split()
 
-# # crunch colors to 16 colors per frame
-# palette = scaled[0].filter("palettegen", stats_mode="single",
-#                            max_colors=16, reserve_transparent=0)
-# crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
+# crunch colors to 16 colors per frame
+palette = scaled[0].filter("palettegen", stats_mode="single",
+                           max_colors=16, reserve_transparent=0)
+crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
 
-# # force 4-4-4 color depth
-# final = crunched.filter("format", pix_fmts="rgb444be")
+# force 4-4-4 color depth
+final = crunched.filter("format", pix_fmts="rgb444be")
 
 
 # # == crunch then scale ==
@@ -87,21 +87,21 @@ in_v = input.video.filter("fps", fps=(1 / SECONDS_PER_FRAME))
 # final = scaled.filter("format", pix_fmts="rgb444be")
 
 
-# == pure mono ==
-scaled = in_v.filter("scale", width=288, height=192)
+# # == pure mono ==
+# scaled = in_v.filter("scale", width=288, height=192)
 
-# # crunch colors to 16 colors per frame
-# palette = scaled[0].filter("palettegen", stats_mode="single",
-#                            max_colors=16, reserve_transparent=0)
-# crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
+# # # crunch colors to 16 colors per frame
+# # palette = scaled[0].filter("palettegen", stats_mode="single",
+# #                            max_colors=16, reserve_transparent=0)
+# # crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
 
-# # force 4-4-4 color depth
-# final = crunched.filter("format", pix_fmts="rgb444be")
-black = ffmpeg.input("color=Black:s=288x192", f="lavfi")
-white = ffmpeg.input("color=White:s=288x192", f="lavfi")
-gray = ffmpeg.input("color=DarkGray:s=288x192", f="lavfi")
+# # # force 4-4-4 color depth
+# # final = crunched.filter("format", pix_fmts="rgb444be")
+# black = ffmpeg.input("color=Black:s=288x192", f="lavfi")
+# white = ffmpeg.input("color=White:s=288x192", f="lavfi")
+# gray = ffmpeg.input("color=DarkGray:s=288x192", f="lavfi")
 
-final = ffmpeg.filter([scaled, gray, black, white], "threshold")
+# final = ffmpeg.filter([scaled, gray, black, white], "threshold")
 
 
 # 2. output frames as separate images
@@ -125,7 +125,7 @@ if monfile:
 
 # 3. convert to CDG
 print(f":: Converting frames to CDG packets...")
-packets = b""
+packets = []
 
 frames = os.listdir(framedir)
 frames.sort()
@@ -138,12 +138,14 @@ for f in frames:
 
     # print(file)
     fpk = libcdg.image_to_packets(file)
-    # print(f"frame took {len(fpk)} bytes ( {len(fpk) / 300} seconds ) ")
     packets += fpk
 
 
 # 4. output .cdg + .mp3
+print(f":: Writing output to {out}.cdg/.mp3...")
 with open(f"{out}.cdg", "wb") as outfile:
-    outfile.write(packets)
+    outfile.writelines(packets)
 
 input.audio.output(f"{out}.mp3").overwrite_output().run(quiet=quiet)
+
+print(f":: Done!")
