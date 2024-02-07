@@ -33,14 +33,20 @@ def nop():
 
 
 def preset_memory(color: int, repeat: int = 4):
+    assert color <= 0x0F and repeat <= 0x0F
     return _packet(INST_PRESET_MEMORY, pack(">BB14x", color, repeat))
 
 
 def preset_border(color: int):
+    assert color <= 0x0F
     return _packet(INST_PRESET_BORDER, pack(">B15x", color))
 
 
 def write_font_block(bg_color, fg_color, row, column, pixels, channel=0):
+    assert bg_color <= 0x0F and fg_color <= 0x0F
+    assert row <= 0x1F and column <= 0x3F
+    assert all([byte <= 0x3F for byte in pixels])
+
     return _packet(
         INST_WRITE_FONT_BLOCK,
         pack(">BBBB12s", bg_color, fg_color, row, column, pixels),
@@ -48,6 +54,10 @@ def write_font_block(bg_color, fg_color, row, column, pixels, channel=0):
 
 
 def xor_font_block(bg_color, fg_color, row, column, pixels, channel=0):
+    assert bg_color <= 0x0F and fg_color <= 0x0F
+    assert row <= 0x1F and column <= 0x3F
+    assert all([byte <= 0x3F for byte in pixels])
+
     return _packet(
         INST_XOR_FONT_BLOCK,
         pack(">BBBB12s", bg_color, fg_color, row, column, pixels),
@@ -55,10 +65,15 @@ def xor_font_block(bg_color, fg_color, row, column, pixels, channel=0):
 
 
 def scroll_preset(color, h_scroll, v_scroll):
+    assert color <= 0x0F
+    assert h_scroll <= 0x3F and v_scroll <= 0x3F
+
     return _packet(INST_SCROLL_PRESET, pack(">BBB13x", color, h_scroll, v_scroll))
 
 
 def scroll_copy(h_scroll, v_scroll):
+    assert h_scroll <= 0x3F and v_scroll <= 0x3F
+
     return _packet(INST_SCROLL_PRESET, pack(">xBB13x", h_scroll, v_scroll))
 
 
@@ -75,6 +90,8 @@ def load_color_table_high(colors: list[list[int]]):
 
 
 def _load_colors(instr, colors):
+    assert all([tuple(rgb) <= (0x0F, 0x0F, 0x0F) for rgb in colors])
+
     # pack rgb 444 into the two bytes expected
     # xxRRRRGG xxGGBBBB
     colors_packed = [
