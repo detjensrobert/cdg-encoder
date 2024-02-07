@@ -51,7 +51,9 @@ def image_to_packets(image_path: str, frame_time=0) -> list[bytes]:
 
 
         # set colors in palette
-        palette = image.getpalette()
+        palette = list(groups_of(image.getpalette(), 3))
+        dbg(f"PALETTE IS: {len(palette)}: {palette}")
+
         packets.append(set_palette(palette))
 
         # set canvas and border color
@@ -85,9 +87,10 @@ def image_to_packets(image_path: str, frame_time=0) -> list[bytes]:
     return packets
 
 
-def set_palette(colors) -> bytes:
+def set_palette(colors: list[tuple[int]]) -> bytes:
+    assert len(colors[0]) == 3, "palette should be list of RGB tuples!"
+
     # pad to 16 colors if needed
-    colors = list(groups_of(colors, 3))
     colors += [(0, 0, 0)] * (16 - len(colors))
 
     assert len(colors) == 16
@@ -130,6 +133,7 @@ def set_block(full_image, row, col):
 
     colors = [idx for _cnt, idx in two_color.getcolors()]
 
+    dbg(f"tile colors: {colors}")
     assert len(colors) in [1, 2], "too many colors in tile!"
 
     if len(colors) == 1:

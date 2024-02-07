@@ -3,14 +3,14 @@
 video2cdg: convert video to CD+G graphics
 
 Usage:
-    video2cdg <input.mp4> [-v] [--frames-dir <dir>] [--monitor <path/to.mp4>]
+    video2cdg <input.mp4> [-v] [--frames-dir <dir>] [--monitor <path/to.mp4>] [--mono]
 
 Options:
     --frames-dir <dir>        Tempdir to store intermediary frames in [default: ./frames]
     --monitor <path/to.mp4>   Create a 'monitor' video from output frame data
     -v --verbose              Show ffmpeg transcode output
 
-Generates
+    --mono                    Use strict black/white for video instead of color
 
 """
 
@@ -59,16 +59,28 @@ input = ffmpeg.input(infile)
 in_v = input.video.filter("fps", fps=(1 / SECONDS_PER_FRAME))
 
 
-# == scale then crunch ==
-scaled = in_v.filter("scale", width=288, height=192).split()
+if ARGS["--mono"]:
+    # == pure mono ==
+    scaled = in_v.filter("scale", width=288, height=192)
 
-# crunch colors to 16 colors per frame
-palette = scaled[0].filter("palettegen", stats_mode="single",
-                           max_colors=16, reserve_transparent=0)
-crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
+    # force black or white
+    black = ffmpeg.input("color=Black:s=288x192", f="lavfi")
+    white = ffmpeg.input("color=White:s=288x192", f="lavfi")
+    gray = ffmpeg.input("color=DarkGray:s=288x192", f="lavfi")
 
-# force 4-4-4 color depth
-final = crunched.filter("format", pix_fmts="rgb444be")
+    final = ffmpeg.filter([scaled, gray, black, white], "threshold")
+
+else: # --color
+    # == scale then crunch ==
+    scaled = in_v.filter("scale", width=288, height=192).split()
+
+    # crunch colors to 16 colors per frame
+    palette = scaled[0].filter("palettegen", stats_mode="single",
+                            max_colors=16, reserve_transparent=0)
+    crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
+
+    # force 4-4-4 color depth
+    final = crunched.filter("format", pix_fmts="rgb444be")
 
 
 # # == crunch then scale ==
@@ -86,22 +98,6 @@ final = crunched.filter("format", pix_fmts="rgb444be")
 # # force 4-4-4 color depth
 # final = scaled.filter("format", pix_fmts="rgb444be")
 
-
-# # == pure mono ==
-# scaled = in_v.filter("scale", width=288, height=192)
-
-# # # crunch colors to 16 colors per frame
-# # palette = scaled[0].filter("palettegen", stats_mode="single",
-# #                            max_colors=16, reserve_transparent=0)
-# # crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
-
-# # # force 4-4-4 color depth
-# # final = crunched.filter("format", pix_fmts="rgb444be")
-# black = ffmpeg.input("color=Black:s=288x192", f="lavfi")
-# white = ffmpeg.input("color=White:s=288x192", f="lavfi")
-# gray = ffmpeg.input("color=DarkGray:s=288x192", f="lavfi")
-
-# final = ffmpeg.filter([scaled, gray, black, white], "threshold")
 
 
 # 2. output frames as separate images
