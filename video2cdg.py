@@ -14,11 +14,11 @@ Options:
 
 """
 
-import ffmpeg
-import docopt
-import PIL
 import os
 from pathlib import Path
+
+import docopt
+import ffmpeg
 
 from libcdg import libcdg
 

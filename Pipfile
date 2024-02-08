@@ -5,10 +5,8 @@ name = "pypi"
 
 [packages]
 pillow = "*"
-numpy = "*"
 ffmpeg-python = "*"
 docopt = "*"
-graphviz = "*"
 
 [dev-packages]
 

@@ -1,9 +1,8 @@
-from PIL import Image, ImageOps
-import itertools
 import functools
+import itertools
 import random
 
-# import numpy as np
+from PIL import Image, ImageOps
 
 from . import instructions
 from .constants import *
@@ -52,17 +51,15 @@ def image_to_packets(image_path: str, frame_time=0) -> list[bytes]:
 
         # set colors in palette
         palette = list(groups_of(image.getpalette(), 3))
-        dbg(f"PALETTE IS: {len(palette)}: {palette}")
-
         packets.append(set_palette(palette))
+
 
         # set canvas and border color
         packets.append(instructions.preset_memory(1))
         packets.append(instructions.preset_border(0))
 
-        pixel_map = list(groups_of(image.tobytes(), FULL_WIDTH))
 
-
+        # shuffle block orders to make this more Fun:TM:
         blocks = list(itertools.product(r_range, c_range))
         transitions = {
             "row":      lambda: blocks.sort(),
@@ -71,13 +68,9 @@ def image_to_packets(image_path: str, frame_time=0) -> list[bytes]:
             "col_rev":  lambda: blocks.sort(key=(lambda b: (b[1], b[0])), reverse=True),
             "random":   lambda: random.shuffle(blocks)
         }
-        # random.choice(list(transitions.values()))()
-        # random.choice(list(transitions.values()))()
-        transitions["row"]()
+        random.choice(list(transitions.values()))()
 
-        # split image into tiles
-        # right now we only care about the visible area (1..-2)
-
+        # convert tiles to instruction packets
         packets += [
             set_block(image, r, c)
             for r, c in blocks
@@ -95,9 +88,11 @@ def set_palette(colors: list[tuple[int]]) -> bytes:
 
     assert len(colors) == 16
 
+    colors_444 = list(map(rgb_to_444, colors))
+
     # fmt: off
-    return instructions.load_color_table_low(colors[0:8]) \
-         + instructions.load_color_table_high(colors[8:16])
+    return instructions.load_color_table_low(colors_444[0:8]) \
+         + instructions.load_color_table_high(colors_444[8:16])
     # fmt: on
 
 
@@ -133,7 +128,6 @@ def set_block(full_image, row, col):
 
     colors = [idx for _cnt, idx in two_color.getcolors()]
 
-    dbg(f"tile colors: {colors}")
     assert len(colors) in [1, 2], "too many colors in tile!"
 
     if len(colors) == 1:
@@ -152,7 +146,9 @@ def set_block(full_image, row, col):
 
     return instructions.write_font_block(bg, fg, row, col, pix_bits)
 
-
+def rgb_to_444(color: tuple[int]):
+    r,g,b = color
+    return (round(r / 16), round(g / 16), round(b / 16))
 
 def show(img):
     img.convert("RGB").show()
