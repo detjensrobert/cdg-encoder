@@ -10,6 +10,7 @@
       ],
     }
   },
+  "postCreateCommand": "sudo apt update && sudo apt install ffmpeg -y && pipenv install --system",
   // "workspaceMount": "", //selinux
   "runArgs": [
     "--userns=keep-id", //may be needed for docker / rootful podman
