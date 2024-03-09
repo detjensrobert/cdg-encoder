@@ -3,15 +3,14 @@
 video2cdg: convert video to CD+G graphics
 
 Usage:
-    video2cdg <input.mp4> [-v] [--frames-dir <dir>] [--monitor <path/to.mp4>] [--mono]
+    video2cdg <input.mp4> [-v] [--frames-dir <dir>] [--monitor <path/to.mp4>] [--mono] [--frame-palettes]
 
 Options:
     --frames-dir <dir>        Tempdir to store intermediary frames in [default: ./frames]
-    --monitor <path/to.mp4>   Create a 'monitor' video from output frame data
-    -v --verbose              Show ffmpeg transcode output
-
-    --mono                    Use strict black/white for video instead of color
-
+    --monitor <path/to.mp4>   Create a 'monitor' video from output frame data (before CDG conversion)
+    -v, --verbose             Show ffmpeg transcode output
+    --mono                    Use 1-bit black/white for video instead of color
+    --frame-palettes          Use a new palette for each frame instead of one for the whole video
 """
 
 import os
@@ -20,10 +19,12 @@ from pathlib import Path
 import docopt
 import ffmpeg
 
-from libcdg import libcdg
+from libcdg import helpers
+from libcdg.constants import DISPLAY_HEIGHT, DISPLAY_WIDTH
 
 # SECONDS_PER_FRAME = 4.0
 SECONDS_PER_FRAME = 2.79
+PALETTE_FILE = "_palette.png"
 
 # === STEPS ===
 # 1. transcode input file to 288x192 (usable resolution of CD+G)
@@ -50,59 +51,53 @@ if os.path.exists(framedir) and len(os.listdir(framedir)) > 0:
     print(f"ERR: frames dir '{framedir}' is not empty!")
     print("ERR:")
     exit(1)
+# make sure it exists
+os.makedirs(framedir, exist_ok=True)
+
 
 # 1. convert input with ffmpeg
 
 input = ffmpeg.input(infile)
 
-# reduce framerate to CD+G full update speed
-in_v = input.video.filter("fps", fps=(1 / SECONDS_PER_FRAME))
+# reduce framerate to CD+G full update speed, resolution, and bit depth
+# fmt: off
+# hands off my line breaks, black!
+scaled = (
+    input.video
+    .filter("fps", fps=(1 / SECONDS_PER_FRAME))
+    .filter("scale", width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT)
+    # .filter("format", pix_fmts="rgb444be")
+)
+# fmt: on
 
-
-if ARGS["--mono"]:
-    # == pure mono ==
-    scaled = in_v.filter("scale", width=288, height=192)
-
-    # force black or white
+if ARGS["--mono"]:  # force 1-bit black/white
     black = ffmpeg.input("color=Black:s=288x192", f="lavfi")
     white = ffmpeg.input("color=White:s=288x192", f="lavfi")
     gray = ffmpeg.input("color=DarkGray:s=288x192", f="lavfi")
 
-    final = ffmpeg.filter([scaled, gray, black, white], "threshold")
-
-else: # --color
-    # == scale then crunch ==
-    scaled = in_v.filter("scale", width=288, height=192).split()
-
-    # crunch colors to 16 colors per frame
-    palette = scaled[0].filter("palettegen", stats_mode="single",
-                            max_colors=16, reserve_transparent=0)
-    crunched = ffmpeg.filter([scaled[1], palette], "paletteuse", new=1)
-
-    # force 4-4-4 color depth
-    final = crunched.filter("format", pix_fmts="rgb444be")
+    scaled = ffmpeg.filter([scaled, gray, black, white], "threshold")
 
 
-# # == crunch then scale ==
-# in_vs = in_v.split()
+print(f":: Generating palette...")
+# crunch to 16 colors (global palette)
+palettegen = (
+    scaled
+    # crunch to 16 colors (global palette)
+    .filter("palettegen", max_colors=16, reserve_transparent=0)
+    # force 4-4-4 color depth for palette
+    # .filter("format", pix_fmts="rgb444be")
+)
+# TODO remove the other 256-16 colors from output png
+# write out palette for later use
+palettegen.output(f"{framedir}/{PALETTE_FILE}").overwrite_output().run(quiet=quiet)
 
-# palette = (
-#     in_vs[0]
-#     # crunch colors to 16 colors per frame
-#     .filter("palettegen", stats_mode="single", max_colors=16, reserve_transparent=0)
-# )
-# crunched = ffmpeg.filter([in_vs[1], palette], "paletteuse", new=1)
-
-# scaled = in_v.filter("scale", width=288, height=192)
-
-# # force 4-4-4 color depth
-# final = scaled.filter("format", pix_fmts="rgb444be")
-
+# crunch according to palette
+palette = ffmpeg.input(f"{framedir}/{PALETTE_FILE}")
+final = ffmpeg.filter([scaled, palette], "paletteuse")
 
 
 # 2. output frames as separate images
 print(f":: Creating frames under {framedir}...")
-os.makedirs(framedir, exist_ok=True)
 final.output(f"{framedir}/%05d.png").run(quiet=quiet)
 
 
@@ -119,22 +114,20 @@ if monfile:
         .run(quiet=quiet)
     )
 
-# 3. convert to CDG
+
+# 3. convert frames to CDG
 print(f":: Converting frames to CDG packets...")
 packets = []
 
-frames = os.listdir(framedir)
-frames.sort()
-for f in frames:
-    # extract palette
-    # partition to cells
-    # encode cells
-    # fill remaining time
-    file = f"{framedir}/{f}"
+palettefile = f"{framedir}/{PALETTE_FILE}"
 
-    # print(file)
-    fpk = libcdg.image_to_packets(file)
-    packets += fpk
+frames = os.listdir(framedir)
+frames.remove(PALETTE_FILE)
+frames.sort()
+
+for f in frames:
+    file = f"{framedir}/{f}"
+    packets += helpers.image_to_packets(file, palettefile=(not ARGS["--frame-palettes"] and palettefile))
 
 
 # 4. output .cdg + .mp3

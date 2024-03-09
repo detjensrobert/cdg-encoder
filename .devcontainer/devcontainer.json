@@ -1,6 +1,10 @@
 {
   "name": "Python",
   "image": "mcr.microsoft.com/devcontainers/python:latest",
+  "build": {
+    "dockerfile": "Containerfile",
+    "context": ".."
+  },
   "customizations": {
     "vscode": {
       "extensions": [
@@ -10,7 +14,6 @@
       ],
     }
   },
-  "postCreateCommand": "sudo apt update && sudo apt install ffmpeg -y && pipenv install --system",
   // "workspaceMount": "", //selinux
   "runArgs": [
     "--userns=keep-id", //may be needed for docker / rootful podman

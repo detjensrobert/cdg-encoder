@@ -1,154 +1,167 @@
-import functools
 import itertools
-import random
+import os
+import queue
+import subprocess
+import tempfile
+from pathlib import Path
 
-from PIL import Image, ImageOps
+import ffmpeg
+from PIL import Image
+import numpy as np
 
 from . import instructions
 from .constants import *
-
-# information from https://jbum.com/cdg_revealed.html
-# and https://goughlui.com/2019/03/31/tech-flashback-the-cdgraphics-format-cdg/
+from .helpers import groups_of, rgb_to_444, set_palette
 
 
-def dbg(msg):
-    import sys
+class Video:
+    FRAME_RATE = 30
+    PACKETS_PER_FRAME = PACKETS_PER_SECOND / FRAME_RATE
 
-    sys.stderr.write(repr(msg) + "\n")
+    def __init__(self, source: str | os.PathLike, mono=False, quiet=True) -> None:
+        self.source = str(source)
+        self.mono = mono
+        self.quiet = quiet
 
+        self.current_frame = 0
+        self.packets: list[bytes] = []
 
-def groups_of(it, n) -> iter:
-    it = iter(it)
-    return iter(lambda: list(itertools.islice(it, n)), [])
+        # do this one at init
+        self.palette = self.calc_palette()
 
+    def calc_palette(self) -> list[tuple[int, int, int]]:
+        scaled = (
+            ffmpeg.input(self.source)
+            # ensure 30fps to better match packet rate
+            .filter("fps", fps=30)
+            # scale to CDG canvas size
+            .filter("scale", width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT)
+            # annoying
+        )
 
-def image_to_packets(image_path: str, frame_time=0) -> list[bytes]:
-    """
-    Encodes image at `image_path` to CD+G packets,
-    with padding to meet minimum frame time set by `frame_time` in seconds
-    (300 packets per second)
-    """
+        if self.mono:  # force 1-bit black/white?
+            black = ffmpeg.input("color=Black:s=288x192", f="lavfi")
+            white = ffmpeg.input("color=White:s=288x192", f="lavfi")
+            gray = ffmpeg.input("color=DarkGray:s=288x192", f="lavfi")
 
-    packets = []
+            scaled = ffmpeg.filter([scaled, gray, black, white], "threshold")
 
-    with Image.open(image_path) as image:
-        # make sure image is 16 colors only
-        image = image.convert("P", palette=Image.ADAPTIVE, colors=16)
+        # save scaling pipeline for output later
+        self.scaled = scaled
 
-        if image.size == (FULL_WIDTH, FULL_HEIGHT):
-            # print("  image covers full canvas")
-            # image covers entire canvas
-            r_range, c_range = range(0,BLOCK_WIDTH+1), range(0,BLOCK_HEIGHT+1)
-        else:
-            # print("  image covers visible area only")
-            # restrict to visible canvas area
-            r_range, c_range = range(1,BLOCK_WIDTH), range(1,BLOCK_HEIGHT)
+        # crunch to 16 colors (global palette)
+        palettegen = scaled.filter("palettegen", max_colors=16, reserve_transparent=0)
+        # TODO remove the other 256-16 colors from output png
 
-        # do in two steps to avoid stretching
-        image = ImageOps.pad(image, (image.size[0], FULL_HEIGHT))
-        image = ImageOps.pad(image, (FULL_WIDTH, FULL_HEIGHT))
+        # save palette to tempfile for later use
+        self.palette_file = tempfile.NamedTemporaryFile(
+            prefix="libcdg_pallette_", suffix=".png"
+        )
+        (
+            palettegen.output(self.palette_file.name, vframes=1)
+            .global_args("-hide_banner")
+            .overwrite_output()
+            .run(quiet=self.quiet)
+        )
 
+        with Image.open(self.palette_file) as palimg:
+            palimg = palimg.convert("P")
 
-        # set colors in palette
-        palette = list(groups_of(image.getpalette(), 3))
-        packets.append(set_palette(palette))
+            palette = list(groups_of(palimg.getpalette(), 3))
+            # remove duplicates
+            palette = list(set([tuple(rgb) for rgb in palette]))
 
+            assert len(palette) <= 16, "too many colors in palette image!"
+            return palette
 
+    def start_ffmpeg(self) -> subprocess.Popen:
+        "Captures output frames from ffmpeg over pipe"
+
+        # from pallete gen
+        palette = ffmpeg.input(filename=self.palette_file.name)
+
+        ffprocess = (
+            ffmpeg.filter([self.scaled, palette], "paletteuse")
+            .output("pipe:", format="rawvideo", pix_fmt="rgb24")
+            .global_args("-hide_banner")
+            .run_async(pipe_stdout=True)
+        )
+
+        return ffprocess
+
+    def encode(self):
+        "Encode frames"
+
+        FRAME_SIZE = DISPLAY_WIDTH * DISPLAY_HEIGHT * 3
+
+        # set palette first
+        self.packets += set_palette(self.palette)
+
+        # set initial fg/bg
         # set canvas and border color
-        packets.append(instructions.preset_memory(1))
-        packets.append(instructions.preset_border(0))
+        self.packets += [instructions.preset_memory(0), instructions.preset_border(1)]
+
+        # blank initial frame to match fill above
+        prev = Image.new("P", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 0)
+        prev.putpalette(itertools.chain(*self.palette))
+
+        with self.start_ffmpeg() as ffpipe:
+            # get next frame from ffmpeg subprocess until exhausted
+            while len(framebytes := ffpipe.stdout.read(FRAME_SIZE)) > 0:
+                self.current_frame += 1
+
+                print(f"frame {self.current_frame} ")
+                # calculate differences from prev frame
+
+                frame = Image.frombytes(
+                    "RGB", (DISPLAY_WIDTH, DISPLAY_HEIGHT), framebytes
+                )
+                # should already be using this palette but make sure
+                frame.quantize(palette=prev, dither=Image.Dither.NONE)
+
+                deltas = self.calc_deltas(prev, frame)
+
+                # set blocks with largest deltas until we run out of packets for this frame
+                while len(self.packets) < self.current_frame * self.PACKETS_PER_FRAME:
+                    #
+
+                    self.packets += [b"x"]
+                    pass
+
+                return  # for now
+
+    def calc_deltas(self, prev: Image.Image, next: Image.Image) -> queue.PriorityQueue:
+        "calculate list of blocks to change in order of largest difference"
+
+        # array shape: 16x48 (canvas blocks) x 12x6 (block pixels)
+        prev_blocks = image_to_blocks(prev)
+        next_blocks = image_to_blocks(next)
+
+        deltas = queue.PriorityQueue()
+
+        # count number of differing pixels
+        diff = lambda a, b: len([True for ai, bi in zip(a, b) if ai != bi])
+
+        # for pblk, nblk in zip(
+        #     enumerate()
+        # )
 
 
-        # shuffle block orders to make this more Fun:TM:
-        blocks = list(itertools.product(r_range, c_range))
-        transitions = {
-            "row":      lambda: blocks.sort(),
-            "row_rev":  lambda: blocks.sort(reverse=True),
-            "col":      lambda: blocks.sort(key=(lambda b: (b[1], b[0]))),
-            "col_rev":  lambda: blocks.sort(key=(lambda b: (b[1], b[0])), reverse=True),
-            "random":   lambda: random.shuffle(blocks)
-        }
-        random.choice(list(transitions.values()))()
+def image_to_blocks(image: Image.Image) -> np.array:
+    "converts `image` data to (numpy) array of block tiles"
+    # adapted from: https://stackoverflow.com/a/16858283
 
-        # convert tiles to instruction packets
-        packets += [
-            set_block(image, r, c)
-            for r, c in blocks
-        ]
+    arr = np.array(image)
 
+    h, w = arr.shape
+    assert h % BLOCK_HEIGHT == 0, f"{h} rows is not evenly divisible by {BLOCK_HEIGHT}"
+    assert w % BLOCK_WIDTH == 0, f"{w} cols is not evenly divisible by {BLOCK_WIDTH}"
 
-    return packets
-
-
-def set_palette(colors: list[tuple[int]]) -> bytes:
-    assert len(colors[0]) == 3, "palette should be list of RGB tuples!"
-
-    # pad to 16 colors if needed
-    colors += [(0, 0, 0)] * (16 - len(colors))
-
-    assert len(colors) == 16
-
-    colors_444 = list(map(rgb_to_444, colors))
-
-    # fmt: off
-    return instructions.load_color_table_low(colors_444[0:8]) \
-         + instructions.load_color_table_high(colors_444[8:16])
-    # fmt: on
-
-
-# def block_pixels(pixels, block_r, block_c):
-#     "Extracts 6x12 block of pixels at specified block coordinates"
-#     assert (
-#         len(pixels) == FULL_HEIGHT and len(pixels[0]) == FULL_WIDTH
-#     ), f"pixel array is the wrong size ({len(pixels)}x{len(pixels[0])})! do not include border tiles!"
-
-#     pix_r, pix_c = block_r * 12, block_c * 6
-#     return [r[pix_c : pix_c + 6] for r in pixels[pix_r : pix_r + 12]]
-
-
-def set_block(full_image, row, col):
-    # crop to tile
-    pix_x, pix_y = col * 6, row * 12
-    block = full_image.crop((pix_x, pix_y, pix_x+TILE_WIDTH, pix_y+TILE_HEIGHT))
-
-    # tiles need max two colors from the overall 16
-    # (this two-step-monty isnt great,
-    #  but this is the easiest and it will probably work for most things)
-    two_color = (
-        block
-        # squish to two arbitrary colors
-        .convert("RGB").quantize(colors=2)
-        # fit back in original palette (no dither to preserve the two colors)
-        .convert("RGB").quantize(palette=full_image, dither=Image.Dither.NONE)
+    # chunked, but one dimensional
+    chunks = (
+        arr.reshape(h // BLOCK_HEIGHT, BLOCK_HEIGHT, -1, BLOCK_WIDTH)
+        .swapaxes(1, 2)
+        .reshape(-1, BLOCK_HEIGHT, BLOCK_WIDTH)
     )
-    # (palette index is the same as original)
-
-    # collect colors used
-    pix_data = two_color.tobytes()
-
-    colors = [idx for _cnt, idx in two_color.getcolors()]
-
-    assert len(colors) in [1, 2], "too many colors in tile!"
-
-    if len(colors) == 1:
-        fg = bg = colors[0]
-    else:
-        fg, bg = colors
-
-    # pack pixels into bits
-    bools = [p == fg for p in pix_data]
-    pix_bits = b"".join(
-        [
-            functools.reduce(lambda a, p: a << 1 | p, byte, 0).to_bytes()
-            for byte in groups_of(bools, 6)
-        ]
-    )
-
-    return instructions.write_font_block(bg, fg, row, col, pix_bits)
-
-def rgb_to_444(color: tuple[int]):
-    r,g,b = color
-    return (round(r / 16), round(g / 16), round(b / 16))
-
-def show(img):
-    img.convert("RGB").show()
+    # split chunk list back into 2d (split into X cols)
+    return np.split(chunks, h / BLOCK_HEIGHT)

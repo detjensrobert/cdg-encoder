@@ -7,6 +7,7 @@ name = "pypi"
 pillow = "*"
 ffmpeg-python = "*"
 docopt = "*"
+numpy = "*"
 
 [dev-packages]
 
