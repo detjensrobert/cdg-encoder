@@ -1,7 +1,8 @@
 FROM mcr.microsoft.com/devcontainers/python:latest
 
 RUN apt update && \
-    apt install ffmpeg -y
+    apt install ffmpeg -y && \
+    pip install ipython
 
 COPY Pipfile Pipfile.lock .
 RUN pipenv install --system

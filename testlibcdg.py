@@ -3,7 +3,7 @@
 import os
 import sys
 
-from libcdg import helpers
+from libcdg import libcdg
 
 FRAMEDIR = "./frames"
 
@@ -24,7 +24,8 @@ for framefile in [f"{FRAMEDIR}/{f}" for f in frames]:
 
     print(framefile)
 
-    packets = helpers.image_to_packets(framefile)
+    packets = libcdg.Video()
+    packets.encode()
 
     # print(packets)
     out.writelines(packets)

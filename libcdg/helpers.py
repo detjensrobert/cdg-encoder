@@ -62,11 +62,11 @@ def image_to_packets(image_path: str, frame_time=0, palettefile: str = None, pal
         if image.size == (FULL_WIDTH, FULL_HEIGHT):
             # print("  image covers full canvas")
             # image covers entire canvas
-            r_range, c_range = range(0,BLOCK_ROWS+1), range(0,BLOCK_COLS+1)
+            r_range, c_range = range(0, FULL_WIDTH_BLOCKS), range(0, FULL_HEIGHT_BLOCKS)
         else:
             # print("  image covers visible area only")
             # restrict to visible canvas area
-            r_range, c_range = range(1,BLOCK_ROWS), range(1,BLOCK_COLS)
+            r_range, c_range = range(1, DISPLAY_WIDTH_BLOCKS), range(1, DISPLAY_HEIGHT_BLOCKS)
 
         # do in two steps to avoid stretching
         image = ImageOps.pad(image, (image.size[0], FULL_HEIGHT))
@@ -102,67 +102,67 @@ def image_to_packets(image_path: str, frame_time=0, palettefile: str = None, pal
     return packets
 
 
-def image_to_packets_mono(image_path: str, frame_time=0) -> list[bytes]:
-    """
-    Encodes monochrome image at `image_path` to CD+G packets.
+# def image_to_packets_mono(image_path: str, frame_time=0) -> list[bytes]:
+#     """
+#     Encodes monochrome image at `image_path` to CD+G packets.
 
-    Conversion will use an explicit `palette` from a PIL Image, or load one from
-    image at `palettefile`, or calculate one internally.
-    """
+#     Conversion will use an explicit `palette` from a PIL Image, or load one from
+#     image at `palettefile`, or calculate one internally.
+#     """
 
-    # read palettefile
-    if palettefile and not paletteimg:
-        paletteimg = Image.open(palettefile).convert("P")
+#     # read palettefile
+#     if palettefile and not paletteimg:
+#         paletteimg = Image.open(palettefile).convert("P")
 
-    packets = []
+#     packets = []
 
-    with Image.open(image_path) as image:
-        # make sure image is 16 colors only
-        if paletteimg:  # use explicit palette if given
-            image = image.convert("RGB").quantize(
-                palette=paletteimg, dither=Image.Dither.NONE
-            )
-        else:
-            image = image.convert("P", palette=Image.ADAPTIVE, colors=16)
+#     with Image.open(image_path) as image:
+#         # make sure image is 16 colors only
+#         if paletteimg:  # use explicit palette if given
+#             image = image.convert("RGB").quantize(
+#                 palette=paletteimg, dither=Image.Dither.NONE
+#             )
+#         else:
+#             image = image.convert("P", palette=Image.ADAPTIVE, colors=16)
 
-        if image.size == (FULL_WIDTH, FULL_HEIGHT):
-            # print("  image covers full canvas")
-            # image covers entire canvas
-            r_range, c_range = range(0, BLOCK_ROWS + 1), range(0, BLOCK_COLS + 1)
-        else:
-            # print("  image covers visible area only")
-            # restrict to visible canvas area
-            r_range, c_range = range(1, BLOCK_ROWS), range(1, BLOCK_COLS)
+#         if image.size == (FULL_WIDTH, FULL_HEIGHT):
+#             # print("  image covers full canvas")
+#             # image covers entire canvas
+#             r_range, c_range = range(0, FULL_WIDTH_BLOCKS), range(0, FULL_HEIGHT_BLOCKS)
+#         else:
+#             # print("  image covers visible area only")
+#             # restrict to visible canvas area
+#             r_range, c_range = range(1, DISPLAY_WIDTH_BLOCKS), range(1, DISPLAY_HEIGHT_BLOCKS)
 
-        # do in two steps to avoid stretching
-        image = ImageOps.pad(image, (image.size[0], FULL_HEIGHT))
-        image = ImageOps.pad(image, (FULL_WIDTH, FULL_HEIGHT))
+#         # do in two steps to avoid stretching
+#         image = ImageOps.pad(image, (image.size[0], FULL_HEIGHT))
+#         image = ImageOps.pad(image, (FULL_WIDTH, FULL_HEIGHT))
 
-        # set colors in palette
-        palette = groups_of(image.getpalette(), 3)
-        # remove duplicates
-        palette = list(set([tuple(rgb) for rgb in palette]))
-        packets.append(set_palette(palette))
+#         # set colors in palette
+#         palette = groups_of(image.getpalette(), 3)
+#         # remove duplicates
+#         palette = list(set([tuple(rgb) for rgb in palette]))
+#         packets.append(set_palette(palette))
 
-        # set canvas and border color
-        packets.append(instructions.preset_memory(1))
-        packets.append(instructions.preset_border(0))
+#         # set canvas and border color
+#         packets.append(instructions.preset_memory(1))
+#         packets.append(instructions.preset_border(0))
 
-        # shuffle block orders to make this more Fun:TM:
-        blocks = list(itertools.product(r_range, c_range))
-        transitions = {
-            "row": lambda: blocks.sort(),
-            "row_rev": lambda: blocks.sort(reverse=True),
-            "col": lambda: blocks.sort(key=(lambda b: (b[1], b[0]))),
-            "col_rev": lambda: blocks.sort(key=(lambda b: (b[1], b[0])), reverse=True),
-            "random": lambda: random.shuffle(blocks),
-        }
-        random.choice(list(transitions.values()))()
+#         # shuffle block orders to make this more Fun:TM:
+#         blocks = list(itertools.product(r_range, c_range))
+#         transitions = {
+#             "row": lambda: blocks.sort(),
+#             "row_rev": lambda: blocks.sort(reverse=True),
+#             "col": lambda: blocks.sort(key=(lambda b: (b[1], b[0]))),
+#             "col_rev": lambda: blocks.sort(key=(lambda b: (b[1], b[0])), reverse=True),
+#             "random": lambda: random.shuffle(blocks),
+#         }
+#         random.choice(list(transitions.values()))()
 
-        # convert tiles to instruction packets
-        packets += [set_block(image, r, c) for r, c in blocks]
+#         # convert tiles to instruction packets
+#         packets += [set_block(image, r, c) for r, c in blocks]
 
-    return packets
+#     return packets
 
 
 def set_palette(colors: list[tuple[int]]) -> tuple[bytes]:
@@ -194,7 +194,7 @@ def set_palette(colors: list[tuple[int]]) -> tuple[bytes]:
 def set_block(full_image, row, col):
     # crop to tile
     pix_x, pix_y = col * 6, row * 12
-    block = full_image.crop((pix_x, pix_y, pix_x+TILE_WIDTH, pix_y+TILE_HEIGHT))
+    block = full_image.crop((pix_x, pix_y, pix_x+BLOCK_WIDTH, pix_y+BLOCK_HEIGHT))
 
     # tiles need max two colors from the overall 16
     # (this two-step-monty isnt great,

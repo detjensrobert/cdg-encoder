@@ -1,24 +1,31 @@
+import functools
 import itertools
+import logging
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import ffmpeg
-from PIL import Image
 import numpy as np
+from PIL import Image
 
 from . import instructions
 from .constants import *
 from .helpers import groups_of, rgb_to_444, set_palette
+from .types import Block, DisplayFrame, FullFrame
 
 
 class Video:
     FRAME_RATE = 30
-    PACKETS_PER_FRAME = PACKETS_PER_SECOND / FRAME_RATE
+    PACKETS_PER_FRAME = PACKETS_PER_SECOND // FRAME_RATE
 
-    def __init__(self, source: str | os.PathLike, mono=False, quiet=True) -> None:
+    log = logging.getLogger("libcdg")
+    log.setLevel("DEBUG")
+
+    def __init__(self, source: str | os.PathLike, mono=False, quiet=True, palette: str | os.PathLike=None) -> None:
         self.source = str(source)
         self.mono = mono
         self.quiet = quiet
@@ -27,36 +34,57 @@ class Video:
         self.packets: list[bytes] = []
 
         # do this one at init
-        self.palette = self.calc_palette()
+        self.palette = self.calc_palette(palette)
 
-    def calc_palette(self) -> list[tuple[int, int, int]]:
+    def ff_scale_input(self):
+        "shared scale input video scale ffmpeg pipeline"
+
+        # create scale pipeline
         scaled = (
             ffmpeg.input(self.source)
             # ensure 30fps to better match packet rate
             .filter("fps", fps=30)
             # scale to CDG canvas size
             .filter("scale", width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT)
-            # annoying
         )
 
-        if self.mono:  # force 1-bit black/white?
+        if self.mono:  # force 1-bit black/white (a la Bad Apple)
             black = ffmpeg.input("color=Black:s=288x192", f="lavfi")
             white = ffmpeg.input("color=White:s=288x192", f="lavfi")
             gray = ffmpeg.input("color=DarkGray:s=288x192", f="lavfi")
 
             scaled = ffmpeg.filter([scaled, gray, black, white], "threshold")
 
-        # save scaling pipeline for output later
-        self.scaled = scaled
+        return scaled
 
-        # crunch to 16 colors (global palette)
-        palettegen = scaled.filter("palettegen", max_colors=16, reserve_transparent=0)
-        # TODO remove the other 256-16 colors from output png
+    def calc_palette(self, palette_img) -> list[tuple[int, int, int]]:
+        "Calculate target palette based on input, or from given image"
+
+        if palette_img and self.mono:
+            self.log.warning("both palette image and mono flag give, using palette image!", file=sys.stderr)
+
+
+        if palette_img:
+            self.log.info(f"using palette from {palette_img}")
+            with Image.open(palette_img) as p:
+                assert len(p.getcolors()) <= 16, f"palette file {palette_img} has more than 16 colors!"
+
+            # use given image as source for ffmpeg palettegen
+            # (ffmpeg wants specific size later so let it generate for itself)
+            palette_input = ffmpeg.input(palette_img)
+
+        else:
+            self.log.info(f"deriving palette from input video")
+            # no image, calculate from source
+            palette_input = self.ff_scale_input()
+
+
+        # crunch source vid or palette image to 16 colors (for global palette)
+        palettegen = palette_input.filter("palettegen", max_colors=16, reserve_transparent=0)
+        # TODO remove the other 256-16 colors from output png?
 
         # save palette to tempfile for later use
-        self.palette_file = tempfile.NamedTemporaryFile(
-            prefix="libcdg_pallette_", suffix=".png"
-        )
+        self.palette_file = tempfile.NamedTemporaryFile(prefix="libcdg_pallette_", suffix=".png")
         (
             palettegen.output(self.palette_file.name, vframes=1)
             .global_args("-hide_banner")
@@ -77,13 +105,13 @@ class Video:
     def start_ffmpeg(self) -> subprocess.Popen:
         "Captures output frames from ffmpeg over pipe"
 
-        # from pallete gen
+        # from palette gen
         palette = ffmpeg.input(filename=self.palette_file.name)
 
         ffprocess = (
-            ffmpeg.filter([self.scaled, palette], "paletteuse")
+            ffmpeg.filter([self.ff_scale_input(), palette], "paletteuse")
             .output("pipe:", format="rawvideo", pix_fmt="rgb24")
-            .global_args("-hide_banner")
+            .global_args("-hide_banner", "-loglevel", "warning")
             .run_async(pipe_stdout=True)
         )
 
@@ -91,6 +119,8 @@ class Video:
 
     def encode(self):
         "Encode frames"
+
+        self.log.info("starting encode...")
 
         FRAME_SIZE = DISPLAY_WIDTH * DISPLAY_HEIGHT * 3
 
@@ -109,59 +139,143 @@ class Video:
             # get next frame from ffmpeg subprocess until exhausted
             while len(framebytes := ffpipe.stdout.read(FRAME_SIZE)) > 0:
                 self.current_frame += 1
+                self.log.debug(f"frame #{self.current_frame} ")
 
-                print(f"frame {self.current_frame} ")
-                # calculate differences from prev frame
-
-                frame = Image.frombytes(
-                    "RGB", (DISPLAY_WIDTH, DISPLAY_HEIGHT), framebytes
-                )
+                frame = Image.frombytes("RGB", (DISPLAY_WIDTH, DISPLAY_HEIGHT), framebytes)
                 # should already be using this palette but make sure
-                frame.quantize(palette=prev, dither=Image.Dither.NONE)
+                frame = frame.quantize(palette=prev, dither=Image.Dither.NONE)
 
-                deltas = self.calc_deltas(prev, frame)
+                # get blocks to update
+                deltas = self.calc_updates(frame, prev)
+                frame_packets = []
 
-                # set blocks with largest deltas until we run out of packets for this frame
-                while len(self.packets) < self.current_frame * self.PACKETS_PER_FRAME:
-                    #
+                # for as long as we have packets
+                for f in range(self.PACKETS_PER_FRAME):
+                    try:
+                        _pri, row, col, data = deltas.get_nowait()
+                    except queue.Empty:
+                        frame_packets.append(instructions.nop())
+                        pass
 
-                    self.packets += [b"x"]
-                    pass
+                    # write out instruction packet
+                    frame_packets.append(self.write_block(data, row, col))
+                    # and update prev frame with changes
+                    change = Image.fromarray(data, mode="P")
+                    prev.paste(change, (col * BLOCK_WIDTH, row * BLOCK_HEIGHT))
 
-                return  # for now
+                self.packets += frame_packets
 
-    def calc_deltas(self, prev: Image.Image, next: Image.Image) -> queue.PriorityQueue:
+        return self
+
+
+    def save(self, name: str, overwrite=False):
+        "Save encoded CDG stream to `name`.cdg and `name`.mp3"
+        assert len(self.packets) != 0, "cannot save before encoding! run `encode()` first"
+        self.log.info(f"saving to {name}.cdg/.mp3")
+
+        mode = "wb" if overwrite else "xb"
+        with open(f"{name}.cdg", mode=mode) as cdgfile:
+            cdgfile.writelines(self.packets)
+
+        # also write out audio
+        mp3 = ffmpeg.input(self.source).output(f"{name}.mp3").global_args("-hide_banner")
+        if overwrite:
+            mp3 = mp3.overwrite_output()
+        mp3.run(quiet=self.quiet)
+
+
+    def image_to_blocks(self, image: Image.Image) -> DisplayFrame | FullFrame:
+        "groups `image` pixel data into (numpy) array of block tiles"
+        # adapted from: https://stackoverflow.com/a/16858283
+
+        assert image.mode == "P"
+        arr = np.array(image)
+
+        h, w = arr.shape
+        assert h % BLOCK_HEIGHT == 0, f"{h} rows is not evenly divisible by {BLOCK_HEIGHT}"
+        assert w % BLOCK_WIDTH == 0, f"{w} cols is not evenly divisible by {BLOCK_WIDTH}"
+
+        # chunked, but one dimensional
+        blocks_1d = (
+            arr.reshape(h // BLOCK_HEIGHT, BLOCK_HEIGHT, -1, BLOCK_WIDTH)
+            .swapaxes(1, 2)
+            .reshape(-1, BLOCK_HEIGHT, BLOCK_WIDTH)
+        )
+
+        # need to convert each block to two colors only
+        # nested func for map
+        def squash_colors(block: Block) -> Block:
+            bimg = Image.fromarray(block, mode="P")
+            bimg.putpalette(itertools.chain(*self.palette))
+
+            # tiles need max two colors from the overall 16
+            # this two-step-monty isnt great and probably loses some color, but it does work
+            # colors= and palette= are exclusive
+            # TODO: can this be made any better?
+            squashed = (
+                bimg
+                # squish to two arbitrary colors
+                .convert("RGB").quantize(colors=2)
+                # fit back in original palette (no dither to preserve the two colors)
+                .convert("RGB").quantize(palette=image, dither=Image.Dither.NONE)
+            )
+            # (palette index is the same as original)
+
+            # convert back to byte array
+            return np.array(squashed)
+
+        blocks_1d = np.array([squash_colors(block) for block in blocks_1d])
+
+        # split chunk list back into 2d (split into X cols)
+        return np.split(blocks_1d, h / BLOCK_HEIGHT)
+
+
+    def calc_updates(self, next: Image.Image, prev: Image.Image) -> queue.PriorityQueue:
         "calculate list of blocks to change in order of largest difference"
 
-        # array shape: 16x48 (canvas blocks) x 12x6 (block pixels)
-        prev_blocks = image_to_blocks(prev)
-        next_blocks = image_to_blocks(next)
+        # array shape: 16x48 x 12x6
+        # (blocks in canvas)   (pixels in block)
+        prev_blocks = self.image_to_blocks(prev)
+        next_blocks = self.image_to_blocks(next)
 
-        deltas = queue.PriorityQueue()
+        updates = queue.PriorityQueue()
+        # delta entry format:
+        # (priority, row, col, new_block_data)
 
         # count number of differing pixels
-        diff = lambda a, b: len([True for ai, bi in zip(a, b) if ai != bi])
+        diff = lambda a, b: len([True for ai, bi in zip(a.flat, b.flat) if ai != bi])
 
-        # for pblk, nblk in zip(
-        #     enumerate()
-        # )
+        for row_i, rows in enumerate(np.stack((prev_blocks, next_blocks), 2)):
+            for col_i, (pblock, nblock) in enumerate(rows):
+                block_diff = diff(pblock, nblock)
+                if block_diff > 0:
+                    # negative delta, since PQ fetches lowest values first
+                    updates.put((-block_diff, row_i, col_i, nblock))
+
+        self.log.debug(f"generated {updates.qsize()} updates")
+        return updates
 
 
-def image_to_blocks(image: Image.Image) -> np.array:
-    "converts `image` data to (numpy) array of block tiles"
-    # adapted from: https://stackoverflow.com/a/16858283
+    def write_block(self, block: Block, row: int, col: int) -> bytes:
+        "converts block to fg/bg and returns generated instruction"
 
-    arr = np.array(image)
+        # self.log.debug(f"writing block at {row=} {col=}")
+        colors = np.unique(block).tolist()
 
-    h, w = arr.shape
-    assert h % BLOCK_HEIGHT == 0, f"{h} rows is not evenly divisible by {BLOCK_HEIGHT}"
-    assert w % BLOCK_WIDTH == 0, f"{w} cols is not evenly divisible by {BLOCK_WIDTH}"
+        assert len(colors) in [1, 2], "too many colors in block!"
 
-    # chunked, but one dimensional
-    chunks = (
-        arr.reshape(h // BLOCK_HEIGHT, BLOCK_HEIGHT, -1, BLOCK_WIDTH)
-        .swapaxes(1, 2)
-        .reshape(-1, BLOCK_HEIGHT, BLOCK_WIDTH)
-    )
-    # split chunk list back into 2d (split into X cols)
-    return np.split(chunks, h / BLOCK_HEIGHT)
+        if len(colors) == 1:
+            fg = bg = colors[0]
+        else:
+            fg, bg = colors
+
+        # pack pixels into bits
+        bools = [p == fg for p in block.flat]
+        pix_bits = b"".join(
+            [
+                functools.reduce(lambda a, p: a << 1 | p, byte, 0).tobytes()
+                for byte in groups_of(bools, 6)
+            ]
+        )
+
+        return instructions.write_font_block(bg, fg, row, col, pix_bits)
