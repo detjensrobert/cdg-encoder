@@ -23,7 +23,11 @@ class Video:
     log = logging.getLogger("libcdg")
     log.setLevel("DEBUG")
 
-    def __init__(self, source: str | os.PathLike, mono=False, quiet=True, palette: str | os.PathLike=None) -> None:
+    def __init__(self, source: str | os.PathLike, mono=False, palette: str | os.PathLike=None, quiet=True, fill_frame=False) -> None:
+        """
+
+        """
+
         self.source = str(source)
         self.mono = mono
         self.quiet = quiet
@@ -31,7 +35,9 @@ class Video:
         self.current_frame = 0
         self.packets: list[bytes] = []
 
-        # do this one at init
+        self.fill_frame = fill_frame
+
+        # calculate palette here at init
         self.palette = self.calc_palette(palette)
 
     def ff_scale_input(self):
@@ -42,14 +48,23 @@ class Video:
             ffmpeg.input(self.source)
             # ensure 30fps to better match packet rate
             .filter("fps", fps=self.FRAME_RATE)
-            # scale to CDG canvas size
-            .filter("scale", width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT)
         )
 
+        # scale to CDG canvas size (either display or full)
+        if self.fill_frame:
+            scaled = scaled.filter("scale", width=FULL_WIDTH, height=FULL_HEIGHT)
+        else:
+            scaled = (
+                scaled
+                .filter("scale", width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT)
+                .filter("pad", width=FULL_WIDTH, height=FULL_HEIGHT, x=-1, y=-1)
+            )
+
         if self.mono:  # force 1-bit black/white (a la Bad Apple)
-            black = ffmpeg.input("color=Black:s=288x192", f="lavfi")
-            white = ffmpeg.input("color=White:s=288x192", f="lavfi")
-            gray = ffmpeg.input("color=DarkGray:s=288x192", f="lavfi")
+            dim = f"s={FULL_WIDTH}x{FULL_HEIGHT}"
+            black = ffmpeg.input(f"color=Black:{dim}", f="lavfi")
+            white = ffmpeg.input(f"color=White:{dim}", f="lavfi")
+            gray = ffmpeg.input( f"color=DarkGray:{dim}", f="lavfi")
 
             scaled = ffmpeg.filter([scaled, gray, black, white], "threshold")
 
@@ -121,7 +136,7 @@ class Video:
 
         self.log.info("starting encode...")
 
-        FRAME_SIZE = DISPLAY_WIDTH * DISPLAY_HEIGHT * 3
+        FRAME_SIZE = FULL_WIDTH * FULL_HEIGHT * 3
 
         # set palette first
         self.packets += set_palette(self.palette)
@@ -131,7 +146,7 @@ class Video:
         self.packets += [instructions.preset_memory(0), instructions.preset_border(1)]
 
         # blank initial frame to match fill above
-        prev = Image.new("P", (DISPLAY_WIDTH, DISPLAY_HEIGHT), 0)
+        prev = Image.new("P", (FULL_WIDTH, FULL_HEIGHT), 0)
         prev.putpalette(itertools.chain(*self.palette))
 
         with self.start_ffmpeg() as ffpipe:
@@ -140,7 +155,7 @@ class Video:
                 self.current_frame += 1
                 self.log.debug(f"frame #{self.current_frame} ")
 
-                frame = Image.frombytes("RGB", (DISPLAY_WIDTH, DISPLAY_HEIGHT), framebytes)
+                frame = Image.frombytes("RGB", (FULL_WIDTH, FULL_HEIGHT), framebytes)
                 # should already be using this palette but make sure
                 frame = frame.quantize(palette=prev, dither=Image.Dither.NONE)
 
