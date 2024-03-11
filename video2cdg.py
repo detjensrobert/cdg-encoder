@@ -3,10 +3,11 @@
 video2cdg: convert video to CD+G graphics
 
 Usage:
-    video2cdg <input.mp4> [--output <output.cdg>] [-v] [--mono] [--palette <image>] [--monitor <path/to.mp4>]
+    video2cdg <input.mp4> [--output <output.cdg>] [-f] [-v] [--mono] [--palette <image>] [--monitor <path/to.mp4>]
 
 Options:
     -o, --output <output.cdg>   Target filename. Will also create output.mp3. Default: input filename
+    -f, --force                 Overwrite output files, if they exist
     -v, --verbose               Show ffmpeg transcode output
     --palette <image>           Palette to use instead of generating one from input
     --mono                      Use 1-bit black/white for video instead of color
@@ -37,6 +38,7 @@ monfile = ARGS["--monitor"]
 palette = ARGS["--palette"]
 quiet = not ARGS["--verbose"]
 mono = ARGS["--mono"]
+overwrite = ARGS["--force"]
 
 # remove ext
 outpath = Path(ARGS["--output"] or infile)
@@ -45,7 +47,9 @@ out = outpath.parent / outpath.stem
 if not quiet:
     print(f"args: {ARGS}")
 
-
+if outpath.exists() and not overwrite:
+    print("ERR: output file exists, use -f to overwrite")
+    exit(1)
 
 cdg = libcdg.Video(infile, palette=palette, mono=mono, quiet=quiet)
 cdg.encode().save(out, overwrite=True)

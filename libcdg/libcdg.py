@@ -1,4 +1,3 @@
-import functools
 import itertools
 import logging
 import os
@@ -6,7 +5,6 @@ import queue
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 import ffmpeg
 import numpy as np
@@ -19,7 +17,7 @@ from .types import Block, DisplayFrame, FullFrame
 
 
 class Video:
-    FRAME_RATE = 30
+    FRAME_RATE = 15
     PACKETS_PER_FRAME = PACKETS_PER_SECOND // FRAME_RATE
 
     log = logging.getLogger("libcdg")
@@ -43,7 +41,7 @@ class Video:
         scaled = (
             ffmpeg.input(self.source)
             # ensure 30fps to better match packet rate
-            .filter("fps", fps=30)
+            .filter("fps", fps=self.FRAME_RATE)
             # scale to CDG canvas size
             .filter("scale", width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT)
         )
@@ -74,7 +72,8 @@ class Video:
             palette_input = ffmpeg.input(palette_img)
 
         else:
-            self.log.info(f"deriving palette from input video")
+            if not self.mono:
+                self.log.info(f"deriving palette from input video")
             # no image, calculate from source
             palette_input = self.ff_scale_input()
 
@@ -149,19 +148,24 @@ class Video:
                 deltas = self.calc_updates(frame, prev)
                 frame_packets = []
 
-                # for as long as we have packets
-                for f in range(self.PACKETS_PER_FRAME):
-                    try:
-                        _pri, row, col, data = deltas.get_nowait()
-                    except queue.Empty:
-                        frame_packets.append(instructions.nop())
-                        pass
-
+                # fetch the first however-many frames we can fit this round
+                updates_this_frame = list(deltas.queue)[:self.PACKETS_PER_FRAME]
+                for _pri, row, col, data in updates_this_frame:
                     # write out instruction packet
                     frame_packets.append(self.write_block(data, row, col))
                     # and update prev frame with changes
                     change = Image.fromarray(data, mode="P")
                     prev.paste(change, (col * BLOCK_WIDTH, row * BLOCK_HEIGHT))
+
+                # self.log.trace(f"processed {len(frame_packets)} packets")
+
+                # pad out if we need to
+                if len(frame_packets) < self.PACKETS_PER_FRAME:
+                    # self.log.trace(f"padding extra {self.PACKETS_PER_FRAME - len(frame_packets)}")
+
+                    frame_packets += [instructions.nop()] * (self.PACKETS_PER_FRAME - len(frame_packets))
+
+                assert len(frame_packets) == self.PACKETS_PER_FRAME, f"{len(frame_packets)} is more than {self.PACKETS_PER_FRAME}!"
 
                 self.packets += frame_packets
 
@@ -245,8 +249,8 @@ class Video:
         # count number of differing pixels
         diff = lambda a, b: len([True for ai, bi in zip(a.flat, b.flat) if ai != bi])
 
-        for row_i, rows in enumerate(np.stack((prev_blocks, next_blocks), 2)):
-            for col_i, (pblock, nblock) in enumerate(rows):
+        for row_i, rows in enumerate(np.stack((prev_blocks, next_blocks), 2), start=0):
+            for col_i, (pblock, nblock) in enumerate(rows, start=0):
                 block_diff = diff(pblock, nblock)
                 if block_diff > 0:
                     # negative delta, since PQ fetches lowest values first
@@ -259,7 +263,7 @@ class Video:
     def write_block(self, block: Block, row: int, col: int) -> bytes:
         "converts block to fg/bg and returns generated instruction"
 
-        # self.log.debug(f"writing block at {row=} {col=}")
+        # self.log.trace(f"writing block at {row=} {col=}")
         colors = np.unique(block).tolist()
 
         assert len(colors) in [1, 2], "too many colors in block!"
@@ -269,13 +273,11 @@ class Video:
         else:
             fg, bg = colors
 
-        # pack pixels into bits
-        bools = [p == fg for p in block.flat]
-        pix_bits = b"".join(
-            [
-                functools.reduce(lambda a, p: a << 1 | p, byte, 0).tobytes()
-                for byte in groups_of(bools, 6)
-            ]
-        )
+        # turn palette index into fg/bg bools
+        bools = np.vectorize(lambda x: x == fg)(block)
+        # only lower 6 bits are used, so pad to 8 bits for packing
+        padded = np.pad(bools, ((0,0), (2,0)))
+        # pack bools into bitfield
+        bits = b"".join(np.packbits(padded))
 
-        return instructions.write_font_block(bg, fg, row, col, pix_bits)
+        return instructions.write_font_block(bg, fg, row, col, bits)
