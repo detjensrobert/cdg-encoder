@@ -1,5 +1,6 @@
 tests/
 frames/
+out/
 *.mp4
 *.cdg
 *.mp3
